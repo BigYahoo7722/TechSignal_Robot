@@ -15,6 +15,7 @@ import os
 import re
 import json
 import time
+import calendar
 import hashlib
 import logging
 import requests
@@ -57,9 +58,18 @@ RSS_FEEDS = {
 
 SENT_FILE = "sent_news.json"
 
-# حداکثر تعداد خبر جدیدی که در هر اجرا (هر ۳۰ دقیقه) از هر منبع ارسال می‌شود
-# تا در اولین اجرا یا در صورت انباشته شدن اخبار، کانال با پیام‌های زیاد شلوغ نشود
-MAX_ITEMS_PER_FEED = 3
+# حداکثر تعداد خبر جدیدی که در هر اجرا از هر منبع بررسی/ارسال می‌شود
+# (سقفی جدا برای هر منبع، تا یک منبع به‌تنهایی سهمیه‌ی کل را اشغال نکند)
+MAX_ITEMS_PER_FEED = 2
+
+# حداکثر تعداد کل خبرهایی که در یک اجرا (هر ۳۰ دقیقه) از مجموع همه‌ی منابع ارسال می‌شود
+# تا کانال در یک اجرا با تعداد زیادی پیام شلوغ نشود
+MAX_ITEMS_TOTAL_PER_RUN = 5
+
+# حداکثر عمر مجاز خبر (بر حسب روز). خبرهای قدیمی‌تر از این، حتی اگر تکراری هم نباشند،
+# ارسال نمی‌شوند (چون بایگانی محسوب می‌شوند، نه خبر تازه).
+MAX_AGE_DAYS = 7
+MAX_AGE_SECONDS = MAX_AGE_DAYS * 24 * 60 * 60
 
 # فاصله‌ی بین ارسال پیام‌ها برای رعایت محدودیت نرخ ارسال تلگرام
 SEND_DELAY_SECONDS = 2
@@ -99,6 +109,21 @@ def save_sent_links(sent_links: set) -> None:
 def make_id(link: str) -> str:
     """ساخت یک شناسه‌ی یکتا و کوتاه از لینک خبر."""
     return hashlib.sha256(link.encode("utf-8")).hexdigest()
+
+
+def is_within_max_age(entry) -> bool:
+    """بررسی می‌کند که خبر بیشتر از MAX_AGE_DAYS روز قدیمی نباشد.
+    اگر فید اصلاً تاریخ انتشار نداشته باشد (به‌ندرت پیش می‌آید)،
+    برای جلوگیری از حذف اشتباهی اخبار، اجازه‌ی عبور داده می‌شود."""
+    published_struct = entry.get("published_parsed") or entry.get("updated_parsed")
+    if not published_struct:
+        return True
+    try:
+        published_epoch = calendar.timegm(published_struct)
+    except (TypeError, ValueError, OverflowError):
+        return True
+    age_seconds = time.time() - published_epoch
+    return age_seconds <= MAX_AGE_SECONDS
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +357,10 @@ def run():
     new_sent_count = 0
 
     for source, feed_url in RSS_FEEDS.items():
+        if new_sent_count >= MAX_ITEMS_TOTAL_PER_RUN:
+            log.info("به سقف کلی %s خبر در این اجرا رسیدیم؛ باقی منابع در اجرای بعدی بررسی می‌شوند.", MAX_ITEMS_TOTAL_PER_RUN)
+            break
+
         log.info("در حال بررسی منبع: %s", source)
         try:
             feed = feedparser.parse(feed_url)
@@ -347,6 +376,8 @@ def run():
         for entry in feed.entries:
             if items_sent_this_feed >= MAX_ITEMS_PER_FEED:
                 break
+            if new_sent_count >= MAX_ITEMS_TOTAL_PER_RUN:
+                break
 
             link = entry.get("link")
             if not link:
@@ -355,6 +386,10 @@ def run():
             news_id = make_id(link)
             if news_id in sent_links:
                 continue  # قبلاً ارسال شده
+
+            if not is_within_max_age(entry):
+                log.info("رد شد (قدیمی‌تر از %s روز): %s", MAX_AGE_DAYS, entry.get("title", "")[:60])
+                continue
 
             title = entry.get("title", "").strip()
             raw_summary = entry.get("summary", "") or entry.get("description", "")
