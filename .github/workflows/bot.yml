@@ -1,0 +1,48 @@
+name: TechSignal News Bot
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: techsignal-bot
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run TechSignal bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+        run: python main.py
+
+      - name: Commit updated sent_news.json (if changed)
+        run: |
+          git config user.name "techsignal-bot"
+          git config user.email "actions@users.noreply.github.com"
+          if ! git diff --quiet -- sent_news.json; then
+            git add sent_news.json
+            git commit -m "chore: update sent news log [skip ci]"
+            git push
+          else
+            echo "تغییری در sent_news.json وجود نداشت."
+          fi
