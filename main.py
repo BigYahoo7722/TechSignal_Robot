@@ -142,22 +142,52 @@ def translate_with_gemini(text: str) -> str | None:
         return None
 
 
+def translate_with_mymemory(text: str) -> str | None:
+    """ترجمه‌ی رایگان و بدون کلید با MyMemory API؛ معمولاً روی سرورهای ابری
+    (مثل GitHub Actions) بهتر از گوگل ترنسلیت کار می‌کند و مسدود نمی‌شود."""
+    try:
+        text_trimmed = text[:490]  # محدودیت این سرویس حدود ۵۰۰ کاراکتر است
+        resp = requests.get(
+            "https://api.mymemory.translated.net/get",
+            params={"q": text_trimmed, "langpair": "en|fa"},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        translated = data.get("responseData", {}).get("translatedText", "").strip()
+        if translated and translated.lower() != text_trimmed.lower():
+            return translated
+        return None
+    except Exception as e:
+        log.warning("خطای ارتباط با MyMemory: %s", e)
+        return None
+
+
 def translate_to_fa(text: str) -> str:
-    """ترجمه‌ی متن به فارسی.
-    اول با Gemini (روان‌تر) تلاش می‌کند؛ در صورت نبود کلید یا خطا،
-    به گوگل ترنسلیت و در نهایت متن اصلی fallback می‌کند."""
+    """ترجمه‌ی متن به فارسی، با زنجیره‌ای از سرویس‌های رایگان برای اطمینان بیشتر:
+    ۱) Gemini (روان‌ترین، نیازمند GEMINI_API_KEY)
+    ۲) MyMemory (رایگان، بدون کلید، مطمئن روی سرورهای ابری)
+    ۳) گوگل ترنسلیت (deep-translator)
+    ۴) در صورت شکست همه، متن اصلی برگردانده می‌شود."""
     if not text:
         return ""
 
     gemini_result = translate_with_gemini(text)
     if gemini_result:
         return gemini_result
+    log.info("Gemini جواب نداد، تلاش با MyMemory...")
+
+    mymemory_result = translate_with_mymemory(text)
+    if mymemory_result:
+        return mymemory_result
+    log.info("MyMemory هم جواب نداد، تلاش با گوگل‌ترنسلیت...")
 
     try:
         text_trimmed = text[:1000]
         return GoogleTranslator(source="auto", target="fa").translate(text_trimmed)
     except Exception as e:
-        log.warning("ترجمه ناموفق بود، متن اصلی استفاده می‌شود: %s", e)
+        log.warning("گوگل‌ترنسلیت هم شکست خورد، متن اصلی (انگلیسی) فرستاده می‌شود: %s", e)
         return text
 
 
