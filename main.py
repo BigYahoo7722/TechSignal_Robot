@@ -12,6 +12,7 @@ TechSignal (تک‌سیگنال) — ربات خودکار جمع‌آوری و 
 """
 
 import os
+import re
 import json
 import time
 import hashlib
@@ -48,6 +49,10 @@ RSS_FEEDS = {
     "The Verge": "https://www.theverge.com/rss/index.xml",
     "Wired": "https://www.wired.com/feed/rss",
     "Ars Technica": "https://feeds.arstechnica.com/arstechnica/index",
+    "Engadget": "https://www.engadget.com/rss.xml",
+    "TechRadar": "https://www.techradar.com/feeds.xml",
+    "ZDNet": "https://www.zdnet.com/news/rss.xml",
+    "CNET": "https://www.cnet.com/rss/news/",
 }
 
 SENT_FILE = "sent_news.json"
@@ -60,6 +65,10 @@ MAX_ITEMS_PER_FEED = 3
 SEND_DELAY_SECONDS = 2
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+TELEGRAM_PHOTO_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+
+# محدودیت طول کپشن تلگرام برای پیام‌های همراه با عکس
+TELEGRAM_CAPTION_LIMIT = 1024
 
 
 # ---------------------------------------------------------------------------
@@ -154,12 +163,48 @@ def translate_to_fa(text: str) -> str:
 
 def clean_summary(raw_summary: str, max_len: int = 220) -> str:
     """حذف تگ‌های HTML احتمالی از خلاصه‌ی RSS و کوتاه کردن آن."""
-    import re
     text = re.sub(r"<[^>]+>", "", raw_summary or "")
     text = " ".join(text.split())
     if len(text) > max_len:
         text = text[:max_len].rsplit(" ", 1)[0] + "…"
     return text
+
+
+def extract_image_url(entry) -> str | None:
+    """تلاش برای استخراج لینک تصویر خبر از فرمت‌های مختلف RSS.
+    ترتیب بررسی: media:content -> media:thumbnail -> enclosure -> تگ img داخل خلاصه/محتوا."""
+    try:
+        media_content = entry.get("media_content")
+        if media_content:
+            for m in media_content:
+                url = m.get("url")
+                if url:
+                    return url
+
+        media_thumbnail = entry.get("media_thumbnail")
+        if media_thumbnail:
+            for m in media_thumbnail:
+                url = m.get("url")
+                if url:
+                    return url
+
+        for enc in entry.get("links", []):
+            if enc.get("rel") == "enclosure" and str(enc.get("type", "")).startswith("image"):
+                url = enc.get("href")
+                if url:
+                    return url
+
+        html_blob = entry.get("summary", "") or ""
+        if not html_blob:
+            content_list = entry.get("content")
+            if content_list:
+                html_blob = content_list[0].get("value", "")
+        match = re.search(r'<img[^>]+src="([^"]+)"', html_blob)
+        if match:
+            return match.group(1)
+    except Exception as e:
+        log.debug("استخراج عکس ناموفق بود: %s", e)
+    return None
 
 
 def build_message(source: str, title_fa: str, summary_fa: str, link: str) -> str:
@@ -183,6 +228,7 @@ def build_message(source: str, title_fa: str, summary_fa: str, link: str) -> str
 # ---------------------------------------------------------------------------
 
 def send_to_telegram(text: str) -> bool:
+    """ارسال پیام متنی ساده (بدون عکس)."""
     if not BOT_TOKEN or not CHANNEL_ID:
         log.error("BOT_TOKEN یا CHANNEL_ID تنظیم نشده است.")
         return False
@@ -202,6 +248,43 @@ def send_to_telegram(text: str) -> bool:
     except requests.RequestException as e:
         log.error("خطای شبکه هنگام ارسال به تلگرام: %s", e)
         return False
+
+
+def send_photo_to_telegram(image_url: str, caption: str) -> bool:
+    """ارسال عکس به همراه کپشن (متن خبر در بالای پیام)."""
+    if not BOT_TOKEN or not CHANNEL_ID:
+        log.error("BOT_TOKEN یا CHANNEL_ID تنظیم نشده است.")
+        return False
+
+    payload = {
+        "chat_id": CHANNEL_ID,
+        "photo": image_url,
+        "caption": caption,
+        "parse_mode": "HTML",
+    }
+    try:
+        resp = requests.post(TELEGRAM_PHOTO_API_URL, data=payload, timeout=25)
+        if resp.status_code == 200:
+            return True
+        log.warning("ارسال عکس ناموفق بود (%s): %s", resp.status_code, resp.text[:200])
+        return False
+    except requests.RequestException as e:
+        log.warning("خطای شبکه هنگام ارسال عکس: %s", e)
+        return False
+
+
+def send_news_item(image_url: str | None, message: str) -> bool:
+    """ابتدا تلاش می‌کند خبر را همراه با عکس (در بالای پیام) بفرستد؛
+    اگر عکسی نبود یا ارسالش شکست خورد، به پیام متنی ساده برمی‌گردد."""
+    if image_url:
+        caption = message
+        if len(caption) > TELEGRAM_CAPTION_LIMIT:
+            caption = caption[: TELEGRAM_CAPTION_LIMIT - 1].rsplit(" ", 1)[0] + "…"
+        if send_photo_to_telegram(image_url, caption):
+            return True
+        log.info("ارسال با عکس ناموفق بود، بازگشت به پیام متنی ساده.")
+
+    return send_to_telegram(message)
 
 
 # ---------------------------------------------------------------------------
@@ -246,13 +329,14 @@ def run():
             title = entry.get("title", "").strip()
             raw_summary = entry.get("summary", "") or entry.get("description", "")
             summary = clean_summary(raw_summary)
+            image_url = extract_image_url(entry)
 
             title_fa = translate_to_fa(title)
             summary_fa = translate_to_fa(summary)
 
             message = build_message(source, title_fa, summary_fa, link)
 
-            if send_to_telegram(message):
+            if send_news_item(image_url, message):
                 log.info("ارسال شد: %s", title[:60])
                 sent_links.add(news_id)
                 new_sent_count += 1
