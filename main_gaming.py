@@ -76,6 +76,7 @@ SEND_DELAY_SECONDS = 2
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 TELEGRAM_PHOTO_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+TELEGRAM_VIDEO_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
 
 # محدودیت طول کپشن تلگرام برای پیام‌های همراه با عکس
 TELEGRAM_CAPTION_LIMIT = 1024
@@ -262,6 +263,39 @@ def extract_image_url(entry) -> str | None:
     return None
 
 
+def extract_video_url(entry) -> str | None:
+    """تلاش برای استخراج لینک فایل ویدیوی مستقیم (mp4 و مشابه) از خبر، در صورت وجود.
+    توجه: اکثر فیدهای خبری فقط عکس دارند نه ویدیو؛ این تابع فقط زمانی نتیجه می‌دهد
+    که منبع واقعاً یک فایل ویدیوی قابل‌پخش مستقیم (نه لینک یوتیوب یا صفحه) ارائه داده باشد."""
+    try:
+        media_content = entry.get("media_content")
+        if media_content:
+            for m in media_content:
+                media_type = str(m.get("type", "") or m.get("medium", ""))
+                url = m.get("url")
+                if url and ("video" in media_type.lower() or url.lower().endswith((".mp4", ".mov", ".webm"))):
+                    return url
+
+        for enc in entry.get("links", []):
+            enc_type = str(enc.get("type", ""))
+            href = enc.get("href")
+            if href and enc.get("rel") == "enclosure" and (
+                enc_type.startswith("video") or href.lower().endswith((".mp4", ".mov", ".webm"))
+            ):
+                return href
+
+        html_blob = entry.get("summary", "") or ""
+        content_list = entry.get("content")
+        if content_list:
+            html_blob += " " + content_list[0].get("value", "")
+        match = re.search(r'<video[^>]+src="([^"]+)"', html_blob)
+        if match:
+            return match.group(1)
+    except Exception as e:
+        log.debug("استخراج ویدیو ناموفق بود: %s", e)
+    return None
+
+
 def build_message(source: str, title_fa: str, summary_fa: str, link: str) -> str:
     """ساخت متن نهایی پیام تلگرام با فرمت HTML."""
     parts = [
@@ -328,13 +362,56 @@ def send_photo_to_telegram(image_url: str, caption: str) -> bool:
         return False
 
 
-def send_news_item(image_url: str | None, message: str) -> bool:
-    """ابتدا تلاش می‌کند خبر را همراه با عکس (در بالای پیام) بفرستد؛
-    اگر عکسی نبود یا ارسالش شکست خورد، به پیام متنی ساده برمی‌گردد."""
+def send_video_to_telegram(video_url: str, caption: str, thumbnail_url: str | None = None) -> bool:
+    """ارسال ویدیوی مستقیم به همراه کپشن. اگر thumbnail_url داده شود، تلاش می‌شود
+    عکس آن دانلود و به‌عنوان کاور ویدیو ضمیمه شود (تلگرام فقط فایل آپلودی برای
+    کاور قبول می‌کند، نه لینک مستقیم عکس)."""
+    if not BOT_TOKEN or not CHANNEL_ID:
+        log.error("BOT_TOKEN یا CHANNEL_ID تنظیم نشده است.")
+        return False
+
+    payload = {
+        "chat_id": CHANNEL_ID,
+        "video": video_url,
+        "caption": caption,
+        "parse_mode": "HTML",
+        "supports_streaming": True,
+    }
+
+    files = None
+    if thumbnail_url:
+        try:
+            thumb_resp = requests.get(thumbnail_url, timeout=15)
+            if thumb_resp.status_code == 200 and len(thumb_resp.content) < 200_000:
+                files = {"thumbnail": ("thumb.jpg", thumb_resp.content, "image/jpeg")}
+                payload["thumbnail"] = "attach://thumbnail"
+        except Exception as e:
+            log.debug("دانلود کاور ویدیو ناموفق بود، بدون کاور ارسال می‌شود: %s", e)
+
+    try:
+        resp = requests.post(TELEGRAM_VIDEO_API_URL, data=payload, files=files, timeout=60)
+        if resp.status_code == 200:
+            return True
+        log.warning("ارسال ویدیو ناموفق بود (%s): %s", resp.status_code, resp.text[:200])
+        return False
+    except requests.RequestException as e:
+        log.warning("خطای شبکه هنگام ارسال ویدیو: %s", e)
+        return False
+
+
+def send_news_item(video_url: str | None, image_url: str | None, message: str) -> bool:
+    """اولویت ارسال: ویدیوی مستقیم (با کاور عکس در صورت وجود) -> فقط عکس -> فقط متن.
+    در هر مرحله، اگر ارسال شکست بخورد، به مرحله‌ی بعدی سقوط می‌کند."""
+    caption = message
+    if len(caption) > TELEGRAM_CAPTION_LIMIT:
+        caption = caption[: TELEGRAM_CAPTION_LIMIT - 1].rsplit(" ", 1)[0] + "…"
+
+    if video_url:
+        if send_video_to_telegram(video_url, caption, thumbnail_url=image_url):
+            return True
+        log.info("ارسال ویدیو ناموفق بود، بازگشت به عکس/متن.")
+
     if image_url:
-        caption = message
-        if len(caption) > TELEGRAM_CAPTION_LIMIT:
-            caption = caption[: TELEGRAM_CAPTION_LIMIT - 1].rsplit(" ", 1)[0] + "…"
         if send_photo_to_telegram(image_url, caption):
             return True
         log.info("ارسال با عکس ناموفق بود، بازگشت به پیام متنی ساده.")
@@ -394,6 +471,7 @@ def run():
             title = entry.get("title", "").strip()
             raw_summary = entry.get("summary", "") or entry.get("description", "")
             summary = clean_summary(raw_summary)
+            video_url = extract_video_url(entry)
             image_url = extract_image_url(entry)
 
             title_fa = translate_to_fa(title)
@@ -401,7 +479,7 @@ def run():
 
             message = build_message(source, title_fa, summary_fa, link)
 
-            if send_news_item(image_url, message):
+            if send_news_item(video_url, image_url, message):
                 log.info("ارسال شد: %s", title[:60])
                 sent_links.add(news_id)
                 new_sent_count += 1
