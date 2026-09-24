@@ -423,6 +423,18 @@ def send_news_item(video_url: str | None, image_url: str | None, message: str) -
 # منطق اصلی
 # ---------------------------------------------------------------------------
 
+def get_published_epoch(entry) -> float:
+    """زمان انتشار خبر را به‌صورت epoch (عدد قابل‌مقایسه) برمی‌گرداند.
+    اگر فید تاریخ نداشته باشد، ۰ برگردانده می‌شود (یعنی در مرتب‌سازی، آخر صف قرار می‌گیرد)."""
+    published_struct = entry.get("published_parsed") or entry.get("updated_parsed")
+    if not published_struct:
+        return 0.0
+    try:
+        return float(calendar.timegm(published_struct))
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+
+
 def run():
     if not BOT_TOKEN or not CHANNEL_ID:
         raise SystemExit(
@@ -431,13 +443,13 @@ def run():
         )
 
     sent_links = load_sent_links()
-    new_sent_count = 0
 
+    # ---------------------------------------------------------------------
+    # مرحله‌ی ۱: جمع‌آوری همه‌ی خبرهای واجدشرایط از تمام منابع
+    # (غیرتکراری و کمتر از MAX_AGE_DAYS روز عمر)
+    # ---------------------------------------------------------------------
+    candidates = []
     for source, feed_url in RSS_FEEDS.items():
-        if new_sent_count >= MAX_ITEMS_TOTAL_PER_RUN:
-            log.info("به سقف کلی %s خبر در این اجرا رسیدیم؛ باقی منابع در اجرای بعدی بررسی می‌شوند.", MAX_ITEMS_TOTAL_PER_RUN)
-            break
-
         log.info("در حال بررسی منبع: %s", source)
         try:
             feed = feedparser.parse(feed_url)
@@ -449,13 +461,7 @@ def run():
             log.warning("فید %s قابل پردازش نبود.", source)
             continue
 
-        items_sent_this_feed = 0
         for entry in feed.entries:
-            if items_sent_this_feed >= MAX_ITEMS_PER_FEED:
-                break
-            if new_sent_count >= MAX_ITEMS_TOTAL_PER_RUN:
-                break
-
             link = entry.get("link")
             if not link:
                 continue
@@ -465,28 +471,69 @@ def run():
                 continue  # قبلاً ارسال شده
 
             if not is_within_max_age(entry):
-                log.info("رد شد (قدیمی‌تر از %s روز): %s", MAX_AGE_DAYS, entry.get("title", "")[:60])
                 continue
 
-            title = entry.get("title", "").strip()
-            raw_summary = entry.get("summary", "") or entry.get("description", "")
-            summary = clean_summary(raw_summary)
-            video_url = extract_video_url(entry)
-            image_url = extract_image_url(entry)
+            candidates.append({
+                "source": source,
+                "entry": entry,
+                "link": link,
+                "news_id": news_id,
+                "published_epoch": get_published_epoch(entry),
+            })
 
-            title_fa = translate_to_fa(title)
-            summary_fa = translate_to_fa(summary)
+    # ---------------------------------------------------------------------
+    # مرحله‌ی ۲: مرتب‌سازی سراسری بر اساس زمان انتشار — جدیدترین خبر اول
+    # (این ترتیب فقط برای «انتخاب بهترین/تازه‌ترین خبرها» استفاده می‌شود)
+    # ---------------------------------------------------------------------
+    candidates.sort(key=lambda c: c["published_epoch"], reverse=True)
 
-            message = build_message(source, title_fa, summary_fa, link)
+    # ---------------------------------------------------------------------
+    # مرحله‌ی ۳: انتخاب خبرهای نهایی، با رعایت سقف هر منبع و سقف کلی هر اجرا
+    # ---------------------------------------------------------------------
+    selected = []
+    per_source_count = {}
+    for cand in candidates:
+        if len(selected) >= MAX_ITEMS_TOTAL_PER_RUN:
+            log.info("به سقف کلی %s خبر در این اجرا رسیدیم؛ باقی در اجرای بعدی بررسی می‌شوند.", MAX_ITEMS_TOTAL_PER_RUN)
+            break
+        source = cand["source"]
+        if per_source_count.get(source, 0) >= MAX_ITEMS_PER_FEED:
+            continue  # سهمیه‌ی این منبع در این اجرا پر شده
+        selected.append(cand)
+        per_source_count[source] = per_source_count.get(source, 0) + 1
 
-            if send_news_item(video_url, image_url, message):
-                log.info("ارسال شد: %s", title[:60])
-                sent_links.add(news_id)
-                new_sent_count += 1
-                items_sent_this_feed += 1
-                time.sleep(SEND_DELAY_SECONDS)
-            else:
-                log.warning("ارسال ناموفق برای: %s", title[:60])
+    # ---------------------------------------------------------------------
+    # مرحله‌ی ۴: ترتیب ارسال را برعکس می‌کنیم (قدیمی‌ترین از بین انتخاب‌شده‌ها اول
+    # ارسال می‌شود، جدیدترین خبر آخرین پیام است). چون تلگرام پیام‌ها را به ترتیب
+    # زمان ارسال نشان می‌دهد، این یعنی تازه‌ترین خبر پایین‌ترین/آخرین پیام کانال می‌شود.
+    # ---------------------------------------------------------------------
+    selected.sort(key=lambda c: c["published_epoch"])
+
+    new_sent_count = 0
+    for cand in selected:
+        source = cand["source"]
+        entry = cand["entry"]
+        link = cand["link"]
+        news_id = cand["news_id"]
+
+        title = entry.get("title", "").strip()
+        raw_summary = entry.get("summary", "") or entry.get("description", "")
+        summary = clean_summary(raw_summary)
+        video_url = extract_video_url(entry)
+        image_url = extract_image_url(entry)
+
+        title_fa = translate_to_fa(title)
+        summary_fa = translate_to_fa(summary)
+
+        message = build_message(source, title_fa, summary_fa, link)
+
+        if send_news_item(video_url, image_url, message):
+            log.info("ارسال شد: %s", title[:60])
+            sent_links.add(news_id)
+            new_sent_count += 1
+            time.sleep(SEND_DELAY_SECONDS)
+        else:
+            log.warning("ارسال ناموفق برای: %s", title[:60])
 
     if new_sent_count > 0:
         save_sent_links(sent_links)
