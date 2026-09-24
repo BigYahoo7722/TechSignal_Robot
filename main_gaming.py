@@ -40,7 +40,7 @@ CHANNEL_ID = os.environ.get("GAMING_CHANNEL_ID")
 # کلید Gemini اختیاری است: اگر تنظیم شود، برای ترجمه‌ی روان‌تر استفاده می‌شود.
 # اگر خالی باشد یا خطا بدهد، به‌صورت خودکار از گوگل ترنسلیت (deep-translator) استفاده می‌شود.
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-3.6-flash"
 GEMINI_API_URL = (
     f"https://generativelanguage.googleapis.com/v1beta/models/"
     f"{GEMINI_MODEL}:generateContent"
