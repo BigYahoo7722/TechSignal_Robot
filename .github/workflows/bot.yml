@@ -1,0 +1,59 @@
+name: TechSignal News Bot
+
+on:
+  schedule:
+    # هر ۳۰ دقیقه یک‌بار اجرا می‌شود (زمان بر اساس UTC است)
+    # توجه: GitHub Actions زمان‌بندی cron را "تقریبی" اجرا می‌کند و ممکن است
+    # در بازه‌های پرترافیک چند دقیقه تاخیر داشته باشد.
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}  # امکان اجرای دستی از تب Actions
+
+permissions:
+  contents: write  # برای commit کردن فایل sent_news.json لازم است
+
+concurrency:
+  group: techsignal-bot
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run TechSignal bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python main.py
+
+      - name: Commit updated sent_news.json (if changed)
+        run: |
+          git config user.name "techsignal-bot"
+          git config user.email "actions@users.noreply.github.com"
+          if ! git diff --quiet -- sent_news.json; then
+            git add sent_news.json
+            git commit -m "chore: update sent news log [skip ci]"
+            for i in 1 2 3 4 5; do
+              if git pull --rebase origin main && git push; then
+                echo "Push successful."
+                break
+              fi
+              echo "Push failed (attempt $i), retrying in 5s..."
+              sleep 5
+            done
+          else
+            echo "تغییری در sent_news.json وجود نداشت."
+          fi
