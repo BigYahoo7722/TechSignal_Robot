@@ -1,0 +1,56 @@
+name: MobileSignal News Bot
+
+on:
+  schedule:
+    - cron: "10,40 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mobilesignal-bot
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run MobileSignal bot
+        env:
+          CHANEL_MOBILE_SENDER: ${{ secrets.CHANEL_MOBILE_SENDER }}
+          MOBILE_CHANNEL_ID: ${{ secrets.MOBILE_CHANNEL_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python main_mobile.py
+
+      - name: Commit updated sent_news_mobile.json (if changed)
+        run: |
+          git config user.name "mobilesignal-bot"
+          git config user.email "actions@users.noreply.github.com"
+          if ! git diff --quiet -- sent_news_mobile.json; then
+            git add sent_news_mobile.json
+            git commit -m "chore: update mobile sent news log [skip ci]"
+            for i in 1 2 3 4 5; do
+              if git pull --rebase origin main && git push; then
+                echo "Push successful."
+                break
+              fi
+              echo "Push failed (attempt $i), retrying in 5s..."
+              sleep 5
+            done
+          else
+            echo "تغییری در sent_news_mobile.json وجود نداشت."
+          fi
