@@ -54,9 +54,13 @@ RSS_FEEDS = {
     "PC Gamer": "https://www.pcgamer.com/rss/",
     "Eurogamer": "https://www.eurogamer.net/feed",
     "VG247": "https://www.vg247.com/feed",
+    "ویجیاتو": "https://digiato.com/game/feed/",
 }
 
 SENT_FILE = "sent_news_gaming.json"
+
+# منابعی که از اول فارسی هستند و نباید دوباره ترجمه شوند
+PERSIAN_SOURCES = {"دیجیاتو", "ویجیاتو"}
 
 # حداکثر تعداد خبر جدیدی که در هر اجرا از هر منبع بررسی/ارسال می‌شود
 # (سقفی جدا برای هر منبع، تا یک منبع به‌تنهایی سهمیه‌ی کل را اشغال نکند)
@@ -73,6 +77,10 @@ MAX_AGE_SECONDS = MAX_AGE_DAYS * 24 * 60 * 60
 
 # فاصله‌ی بین ارسال پیام‌ها برای رعایت محدودیت نرخ ارسال تلگرام
 SEND_DELAY_SECONDS = 2
+
+# فاصله‌ی بین درخواست‌های Gemini، تا سهمیه‌ی لحظه‌ای (Rate Limit) آن پر نشود
+# (چون این کلید بین چند ربات مشترک است، این فاصله شانس موفقیت Gemini را بالا می‌برد)
+GEMINI_CALL_DELAY_SECONDS = 2
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 TELEGRAM_PHOTO_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
@@ -200,6 +208,8 @@ def translate_to_fa(text: str) -> str:
         return ""
 
     gemini_result = translate_with_gemini(text)
+    if GEMINI_API_KEY:
+        time.sleep(GEMINI_CALL_DELAY_SECONDS)  # فاصله برای رعایت سهمیه‌ی لحظه‌ای Gemini
     if gemini_result:
         return gemini_result
     log.info("Gemini جواب نداد، تلاش با MyMemory...")
@@ -522,8 +532,12 @@ def run():
         video_url = extract_video_url(entry)
         image_url = extract_image_url(entry)
 
-        title_fa = translate_to_fa(title)
-        summary_fa = translate_to_fa(summary)
+        if source in PERSIAN_SOURCES:
+            title_fa = title
+            summary_fa = summary
+        else:
+            title_fa = translate_to_fa(title)
+            summary_fa = translate_to_fa(summary)
 
         message = build_message(source, title_fa, summary_fa, link)
 
